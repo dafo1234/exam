@@ -1,0 +1,120 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import r2_score, mean_squared_error
+from torch.utils.data import DataLoader, TensorDataset
+
+# Configuration de l'affichage
+%matplotlib inline
+sns.set_theme(style="whitegrid")
+ Concaténation des deux fichiers
+df1 = pd.read_csv('donnees_agro_part1.csv', sep=';')
+df2 = pd.read_csv('donnees_agro_part2.csv', sep=';')
+df = pd.concat([df1, df2], ignore_index=True)
+
+# Définition des variables
+X_cols = ['Dose d\'engrais (kg/ha)', 'Heures d\'ensoleillement (h/j)', 
+          'Volume d\'eau (mm/sem)', 'Température (°C)', 'Humidité (%)', 'Types de nutriments']
+Y_cols = ['Rendement (kg)', 'Taille des fruits (mm)', 'Teneur en solides solubles (Brix)', 'Niveau de défauts (%)']
+
+# Encodage One-Hot pour la variable qualitative
+X_encoded = pd.get_dummies(df[X_cols], columns=['Types de nutriments'], drop_first=True)
+Y = df[Y_cols]
+
+# Standardisation (Indispensable pour l'ACP)
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X_encoded)
+
+print(f"Fusion terminée : {df.shape[0]} lignes et {X_scaled.shape[1]} variables explicatives.")
+# Application de l'ACP pour garder 95% de la variance
+pca = PCA(n_components=0.95)
+X_pca = pca.fit_transform(X_scaled)
+
+# 1. Eboulis des valeurs propres
+plt.figure(figsize=(10, 5))
+plt.bar(range(1, len(pca.explained_variance_ratio_) + 1), pca.explained_variance_ratio_, alpha=0.6, label='Variance individuelle')
+plt.step(range(1, len(pca.explained_variance_ratio_) + 1), np.cumsum(pca.explained_variance_ratio_), where='mid', label='Variance cumulée', color='red')
+plt.axhline(y=0.95, color='green', linestyle='--', label='Seuil 95%')
+plt.title('Eboulis des valeurs propres')
+plt.xlabel('Composantes Principales')
+plt.ylabel('Part de variance expliquée')
+plt.legend()
+plt.show()
+
+print(f"Nombre de composantes retenues pour 95% de variance : {pca.n_components_}")
+ef plot_pca_circle(pca, features):
+    plt.figure(figsize=(8, 8))
+    for i, feature in enumerate(features):
+        plt.arrow(0, 0, pca.components_[0, i], pca.components_[1, i], color='red', alpha=0.6, head_width=0.03)
+        plt.text(pca.components_[0, i] * 1.1, pca.components_[1, i] * 1.1, feature, fontsize=10)
+    
+    circle = plt.Circle((0,0), 1, color='blue', fill=False)
+    plt.gca().add_artist(circle)
+    plt.xlim(-1.2, 1.2)
+    plt.ylim(-1.2, 1.2)
+    plt.xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%})')
+    plt.ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%})')
+    plt.title('Cercle des Corrélations (PC1 vs PC2)')
+    plt.grid()
+    plt.show()
+
+plot_pca_circle(pca, X_encoded.columns)
+# Préparation des tenseurs
+X_tensor = torch.tensor(X_pca, dtype=torch.float32)
+Y_tensor = torch.tensor(Y.values, dtype=torch.float32)
+
+# Choix de l'accélération GPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Utilisation de : {device}")
+
+# Modèle simple de régression multivariée
+class AgriModel(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super(AgriModel, self).__init__()
+        self.linear = nn.Linear(in_dim, out_dim)
+        
+    def forward(self, x):
+        return self.linear(x)
+
+model = AgriModel(X_pca.shape[1], Y.shape[1]).to(device)
+optimizer = optim.Adam(model.parameters(), lr=0.01)
+criterion = nn.MSELoss()
+
+# Entraînement
+for epoch in range(200):
+    model.train()
+    inputs, targets = X_tensor.to(device), Y_tensor.to(device)
+    
+    outputs = model(inputs)
+    loss = criterion(outputs, targets)
+    
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    
+    if (epoch + 1) % 50 == 0:
+        print(f"Époque {epoch+1}/200 - Perte : {loss.item():.4f}")
+model.eval()
+with torch.no_grad():
+    y_pred = model(X_tensor.to(device)).cpu().numpy()
+    y_true = Y.values
+
+print("\n--- RÉSULTATS DE LA RÉGRESSION ---")
+for i, target in enumerate(Y_cols):
+    r2 = r2_score(y_true[:, i], y_pred[:, i])
+    print(f"R² pour {target} : {r2:.4f}")
+
+# Visualisation des prédictions pour le Rendement
+plt.figure(figsize=(10, 5))
+plt.scatter(y_true[:, 0], y_pred[:, 0], alpha=0.5, color='green')
+plt.plot([y_true[:,0].min(), y_true[:,0].max()], [y_true[:,0].min(), y_true[:,0].max()], 'r--', lw=2)
+plt.title('Prédiction du Rendement (Réel vs Prédit)')
+plt.xlabel('Rendement Réel')
+plt.ylabel('Rendement Prédit')
+plt.show()
